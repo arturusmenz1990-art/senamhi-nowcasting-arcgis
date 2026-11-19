@@ -1,91 +1,91 @@
 
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, parse_qs
-import json
-import html
-import re
+import xml.etree.ElementTree as ET
 
-PAGE = "https://www.senamhi.gob.pe/?p=reportes-nowcasting"
-BASE = "https://idesep.senamhi.gob.pe/geoserver/g_nowcasting/ows"
-
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 SENAMHI-ArcGIS-Integration/1.0"
-})
-
-print("1. Consultando página SENAMHI...")
-
-response = session.get(PAGE, timeout=40)
-response.raise_for_status()
-
-soup = BeautifulSoup(response.text, "html.parser")
-
-links = []
-
-for a in soup.find_all("a", href=True):
-    href = html.unescape(a["href"])
-    url = urljoin(PAGE, href)
-
-    if "g_nowcasting/ows" in url and "viewparams" in url:
-        links.append(url)
-
-# Buscar también URLs presentes en el HTML
-if not links:
-    matches = re.findall(
-        r'https?://[^"\']*g_nowcasting/ows[^"\']*',
-        response.text
-    )
-    links = [
-        html.unescape(x).replace("&amp;", "&")
-        for x in matches if "viewparams" in x
-    ]
-
-if not links:
-    raise RuntimeError(
-        "No se encontró el enlace WFS dinámico. "
-        "Hay que revisar el HTML de la página."
-    )
-
-wfs_link = links[0]
-query = parse_qs(urlparse(wfs_link).query)
-
-viewparams = query.get("viewparams", [None])[0]
-
-if not viewparams:
-    raise RuntimeError("No se encontró viewparams.")
-
-print("2. Reporte identificado:", viewparams)
+BASE = (
+    "https://idesep.senamhi.gob.pe/"
+    "geoserver/g_nowcasting/ows"
+)
 
 params = {
     "service": "WFS",
     "version": "1.0.0",
-    "request": "GetFeature",
-    "typeName": "g_nowcasting:view_nowcasting",
-    "outputFormat": "application/json",
-    "srsName": "EPSG:4326",
-    "maxFeatures": 30000,
-    "viewparams": viewparams
+    "request": "GetCapabilities"
 }
 
-print("3. Descargando entidades WFS...")
+headers = {
+    "User-Agent": "Mozilla/5.0 SENAMHI-ArcGIS-Test/1.0"
+}
 
-r = session.get(BASE, params=params, timeout=(20, 120))
-r.raise_for_status()
+print("===================================")
+print("PRUEBA DIRECTA DEL WFS SENAMHI")
+print("===================================")
+
+print("\n1. Conectando con GeoServer...")
 
 try:
-    data = r.json()
-except ValueError:
-    print(r.text[:2000])
-    raise RuntimeError("El servidor no devolvió JSON válido.")
+    response = requests.get(
+        BASE,
+        params=params,
+        headers=headers,
+        timeout=(30, 90)
+    )
 
-features = data.get("features", [])
+    response.raise_for_status()
 
-if not features:
-    raise RuntimeError("El WFS no devolvió polígonos.")
+    print("HTTP:", response.status_code)
+    print("Conexión establecida.")
 
-print("4. DESCARGA EXITOSA")
-print("Cantidad de entidades:", len(features))
-print("Atributos:", list(features[0]["properties"].keys()))
-print("Geometría:", features[0]["geometry"]["type"])
-print("Reporte:", viewparams)
+    print("\n2. Analizando respuesta XML...")
+
+    root = ET.fromstring(response.content)
+
+    def local_name(element):
+        return element.tag.split("}")[-1]
+
+    if local_name(root) in (
+        "ExceptionReport",
+        "ServiceExceptionReport"
+    ):
+        print("ERROR DEL GEOSERVER:")
+        print(response.text[:3000])
+        raise RuntimeError("GeoServer devolvió una excepción.")
+
+    feature_types = [
+        element for element in root.iter()
+        if local_name(element) == "FeatureType"
+    ]
+
+    print("\n3. CAPAS DISPONIBLES:")
+
+    for feature in feature_types:
+        for child in feature:
+            if local_name(child) == "Name":
+                print("-", child.text)
+
+    expected = "g_nowcasting:view_nowcasting"
+
+    names = [
+        child.text
+        for feature in feature_types
+        for child in feature
+        if local_name(child) == "Name"
+    ]
+
+    if expected not in names:
+        raise RuntimeError(
+            "No se encontró la capa " + expected
+        )
+
+    print("\n===================================")
+    print("WFS ACCESIBLE CORRECTAMENTE")
+    print("CAPA NOWCASTING IDENTIFICADA")
+    print("===================================")
+
+except requests.exceptions.Timeout:
+    print("ERROR: TIEMPO DE CONEXION AGOTADO")
+    raise
+
+except requests.exceptions.RequestException as error:
+    print("ERROR DE CONEXION:", error)
+    raise
